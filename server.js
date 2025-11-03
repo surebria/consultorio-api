@@ -336,138 +336,230 @@ app.post("/api/citas/agendar", async (req, res) => {
     }
   });
 
-  // ===========================================
-// RUTAS DE CITAS - GESTIÓN DE PACIENTES
-// ===========================================
+  // ====================
+// RUTAS DE CITAS - AÑADIR AL server.js
+// ====================
 
-// Función auxiliar para obtener el ID de Paciente (Necesaria para proteger las rutas)
-async function getPacienteId(pool, auth0Id) {
-    // 1. Obtener el ID_Usuario interno
-    const [userRows] = await pool.query(
+// GET /api/citas/mis-citas
+// Obtiene todas las citas del paciente autenticado
+app.get("/api/citas/mis-citas", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
       "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
       [auth0Id]
     );
-    if (userRows.length === 0) return null;
-  
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
     const userId = userRows[0].ID_Usuario;
-  
-    // 2. Obtener el ID_Paciente asociado
-    const [pacienteRows] = await pool.query(
+
+    // 2. Obtener el ID_Paciente
+    const [pacienteRows] = await connection.query(
       "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
       [userId]
     );
-  
-    return pacienteRows.length > 0 ? pacienteRows[0].ID_Paciente : null;
+
+    if (pacienteRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de paciente no encontrado" });
+    }
+
+    const idPaciente = pacienteRows[0].ID_Paciente;
+
+    // 3. Obtener todas las citas del paciente con información relacionada
+    const [citas] = await connection.query(
+      `SELECT 
+        c.ID_Cita,
+        c.Fecha AS Fecha_Cita,
+        c.Hora AS Hora_Cita,
+        c.Estado,
+        c.Notas,
+        s.Nombre AS Servicio,
+        m.Nombre AS Nombre_Medico,
+        m.Apellidos AS Apellidos_Medico
+      FROM cita c
+      INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+      INNER JOIN medico m ON c.ID_Medico = m.ID_Medico
+      WHERE c.ID_Paciente = ?
+      ORDER BY c.Fecha DESC, c.Hora DESC`,
+      [idPaciente]
+    );
+
+    res.json(citas);
+
+  } catch (error) {
+    console.error("Error en /api/citas/mis-citas:", error);
+    res.status(500).json({ error: "Error al obtener las citas del paciente" });
+  } finally {
+    connection.release();
   }
-  app.get("/api/citas/mis-citas", async (req, res) => {
-    try {
-      // Leer el ID_Paciente directamente del query parameter
-      const idPaciente = req.query.idPaciente; 
-
-      // Validar que el ID_Paciente esté presente
-      if (!idPaciente) {
-        // Devolvemos 400 Bad Request si el parámetro necesario falta
-        return res.status(400).json({ error: "Falta el ID_Paciente. Debe ser enviado como query parameter (ej: /mis-citas?idPaciente=456)." });
-      }
-
-      // Convertir el ID a número si es necesario para tu consulta SQL
-      const pacienteIdNum = parseInt(idPaciente, 10);
-      if (isNaN(pacienteIdNum)) {
-         return res.status(400).json({ error: "El ID_Paciente debe ser un número válido." });
-      }
-
-
-      const [citas] = await pool.query(
-        `SELECT 
-          c.ID_Cita, 
-          c.Fecha_Cita, 
-          c.Hora_Cita, 
-          c.Estado, 
-          s.Nombre AS Servicio,
-          m.Nombre AS Nombre_Medico,
-          m.Apellidos AS Apellidos_Medico
-        FROM cita c
-        JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
-        LEFT JOIN medico m ON c.ID_Medico_Asignado = m.ID_Medico
-        WHERE c.ID_Paciente = ?
-        ORDER BY c.Fecha_Cita DESC, c.Hora_Cita DESC`,
-        [pacienteIdNum]
-      );
-
-      res.json(citas);
-    } catch (error) {
-      console.error("Error al obtener mis citas:", error);
-      res.status(500).json({ error: "Error interno al cargar las citas." });
-    }
 });
 
+// POST /api/citas/cancelar/:id_cita
+// Cancela una cita del paciente autenticado
+app.post("/api/citas/cancelar/:id_cita", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    const idCita = req.params.id_cita;
 
-// 2. Cancelar una cita con restricción de 7 días
-// RUTA: /api/citas/cancelar/:idCita
-// Espera el ID del paciente en el cuerpo del request para verificar propiedad
-app.post("/api/citas/cancelar/:idCita", async (req, res) => {
-    const connection = await pool.getConnection();
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
 
-    try {
-      // Para POST/PUT, es común leer la identificación desde el cuerpo
-      const idPaciente = req.body.idPaciente; 
-      const idCita = req.params.idCita;
-
-      if (!idPaciente) {
-        return res.status(400).json({ error: "Falta el ID_Paciente en el cuerpo de la solicitud." });
-      }
-      
-      const pacienteIdNum = parseInt(idPaciente, 10);
-      if (isNaN(pacienteIdNum)) {
-         return res.status(400).json({ error: "El ID_Paciente debe ser un número válido." });
-      }
-
-
-      // 1. Verificar si la cita existe, pertenece al paciente y obtener la fecha
-      const [citaRows] = await connection.query(
-        "SELECT Fecha_Cita, Estado FROM cita WHERE ID_Cita = ? AND ID_Paciente = ?",
-        [idCita, pacienteIdNum]
-      );
-
-      if (citaRows.length === 0) {
-        return res.status(404).json({ error: "Cita no encontrada o no pertenece al usuario." });
-      }
-      
-      if (citaRows[0].Estado === 'Cancelada') {
-          return res.status(400).json({ error: "La cita ya está cancelada." });
-      }
-
-      // 2. Aplicar la restricción de 7 días (1 semana)
-      const fechaCita = new Date(citaRows[0].Fecha_Cita);
-      const hoy = new Date();
-      hoy.setHours(0, 0, 0, 0); 
-      
-      const diffTime = fechaCita.getTime() - hoy.getTime();
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)); 
-
-      if (diffDays <= 7) {
-        return res.status(400).json({ 
-          error: `No se puede cancelar. La cita es en ${diffDays} días o menos. La cancelación solo es permitida con más de 7 días de antelación.` 
-        });
-      }
-
-      // 3. Cancelar la cita
-      await connection.query(
-        "UPDATE cita SET Estado = 'Cancelada' WHERE ID_Cita = ?",
-        [idCita]
-      );
-
-      await connection.commit();
-      res.json({ message: "Cita cancelada exitosamente." });
-
-    } catch (error) {
-      await connection.rollback();
-      console.error("Error al cancelar cita:", error);
-      res.status(500).json({ error: "Error interno al cancelar la cita." });
-    } finally {
-      connection.release();
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
     }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Paciente
+    const [pacienteRows] = await connection.query(
+      "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (pacienteRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de paciente no encontrado" });
+    }
+
+    const idPaciente = pacienteRows[0].ID_Paciente;
+
+    // 3. Verificar que la cita pertenece al paciente y obtener su fecha
+    const [citaRows] = await connection.query(
+      "SELECT ID_Cita, Fecha, Estado FROM cita WHERE ID_Cita = ? AND ID_Paciente = ?",
+      [idCita, idPaciente]
+    );
+
+    if (citaRows.length === 0) {
+      return res.status(404).json({ error: "Cita no encontrada o no pertenece a este paciente" });
+    }
+
+    const cita = citaRows[0];
+
+    // 4. Verificar que la cita no esté ya cancelada
+    if (cita.Estado === 'Cancelada') {
+      return res.status(400).json({ error: "Esta cita ya está cancelada" });
+    }
+
+    // 5. Verificar que la cancelación se hace con más de 7 días de anticipación
+    const fechaCita = new Date(cita.Fecha);
+    fechaCita.setHours(0, 0, 0, 0);
+    
+    const hoy = new Date();
+    hoy.setHours(0, 0, 0, 0);
+    
+    const diffTime = fechaCita.getTime() - hoy.getTime();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    if (diffDays <= 7) {
+      return res.status(400).json({ 
+        error: "No se puede cancelar la cita. Debe cancelarse con más de 7 días de anticipación." 
+      });
+    }
+
+    // 6. Actualizar el estado de la cita a 'Cancelada'
+    await connection.query(
+      "UPDATE cita SET Estado = 'Cancelada' WHERE ID_Cita = ?",
+      [idCita]
+    );
+
+    res.json({ 
+      message: "Cita cancelada exitosamente",
+      id_cita: idCita 
+    });
+
+  } catch (error) {
+    console.error("Error en /api/citas/cancelar:", error);
+    res.status(500).json({ error: "Error al cancelar la cita" });
+  } finally {
+    connection.release();
+  }
 });
+
+// POST /api/citas/agendar (Versión con JWT - REEMPLAZAR la versión actual)
+app.post("/api/citas/agendar", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    const { fecha, hora, id_servicio, notas } = req.body;
+
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Paciente
+    const [pacienteRows] = await connection.query(
+      "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (pacienteRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de paciente no encontrado. Por favor, complete su perfil primero." });
+    }
+
+    const idPaciente = pacienteRows[0].ID_Paciente;
+
+    // 3. Verificar que el horario esté disponible
+    const [citasExistentes] = await connection.query(
+      "SELECT ID_Cita FROM cita WHERE ID_Servicio = ? AND Fecha = ? AND Hora = ? AND Estado != 'Cancelada'",
+      [id_servicio, fecha, hora]
+    );
+
+    if (citasExistentes.length > 0) {
+      return res.status(400).json({ error: "Este horario ya no está disponible" });
+    }
+
+    // 4. Asignar un médico (primer médico disponible - puedes mejorar esta lógica)
+    const [medicos] = await connection.query(
+      "SELECT ID_Medico FROM medico ORDER BY ID_Medico ASC LIMIT 1"
+    );
+
+    if (medicos.length === 0) {
+      return res.status(500).json({ error: "No hay médicos disponibles para asignar" });
+    }
+
+    const idMedicoAsignado = medicos[0].ID_Medico;
+
+    // 5. Insertar la cita
+    const [result] = await connection.query(
+      `INSERT INTO cita (Fecha, Hora, Notas, ID_Paciente, ID_Medico, ID_Servicio, Estado) 
+       VALUES (?, ?, ?, ?, ?, ?, 'Agendada')`,
+      [fecha, hora, notas, idPaciente, idMedicoAsignado, id_servicio]
+    );
+
+    res.json({ 
+      message: "Cita agendada exitosamente",
+      id_cita: result.insertId,
+      id_medico_asignado: idMedicoAsignado
+    });
+
+  } catch (error) {
+    console.error("Error en /api/citas/agendar:", error);
+    res.status(500).json({ error: "Error al agendar la cita" });
+  } finally {
+    connection.release();
+  }
+});
+
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
