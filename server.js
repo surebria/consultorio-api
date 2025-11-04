@@ -621,6 +621,226 @@ app.post("/api/citas/agendar", checkJwt, async (req, res) => {
   }
 });
 
+// ====================
+// RUTAS DE CITAS PARA MÉDICOS
+// ====================
+
+// GET /api/citas/pendientes
+// Obtiene todas las citas pendientes sin médico asignado, agrupadas por servicio
+app.get("/api/citas/pendientes", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    
+    // 1. Verificar que el usuario es médico
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+      return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden acceder." });
+    }
+
+    // 2. Obtener todas las citas pendientes sin médico asignado
+    const [citas] = await connection.query(
+      `SELECT 
+        c.ID_Cita,
+        c.Fecha,
+        c.Hora,
+        c.Estado,
+        c.Notas,
+        c.ID_Servicio,
+        s.Nombre AS Servicio,
+        s.Descripcion AS Servicio_Descripcion,
+        s.Duracion AS Servicio_Duracion,
+        p.Nombre AS Paciente_Nombre,
+        p.Telefono AS Paciente_Telefono,
+        p.Correo AS Paciente_Correo
+      FROM cita c
+      INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+      INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+      WHERE c.ID_Medico IS NULL 
+        AND c.Estado = 'Agendada'
+        AND c.Fecha >= CURDATE()
+      ORDER BY s.Nombre, c.Fecha, c.Hora`,
+      []
+    );
+
+    // 3. Agrupar por servicio
+    const citasPorServicio = citas.reduce((acc, cita) => {
+      const servicioNombre = cita.Servicio;
+      if (!acc[servicioNombre]) {
+        acc[servicioNombre] = {
+          id_servicio: cita.ID_Servicio,
+          nombre: servicioNombre,
+          descripcion: cita.Servicio_Descripcion,
+          duracion: cita.Servicio_Duracion,
+          citas: []
+        };
+      }
+      acc[servicioNombre].citas.push({
+        id_cita: cita.ID_Cita,
+        fecha: cita.Fecha,
+        hora: cita.Hora,
+        estado: cita.Estado,
+        notas: cita.Notas,
+        paciente: {
+          nombre: cita.Paciente_Nombre,
+          telefono: cita.Paciente_Telefono,
+          correo: cita.Paciente_Correo
+        }
+      });
+      return acc;
+    }, {});
+
+    res.json(Object.values(citasPorServicio));
+
+  } catch (error) {
+    console.error("Error en /api/citas/pendientes:", error);
+    res.status(500).json({ error: "Error al obtener las citas pendientes" });
+  } finally {
+    connection.release();
+  }
+});
+
+// POST /api/citas/aceptar/:id_cita
+// Permite al médico aceptar una cita y asignársela
+app.post("/api/citas/aceptar/:id_cita", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    const idCita = req.params.id_cita;
+
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+      return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden aceptar citas." });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Medico
+    const [medicoRows] = await connection.query(
+      "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (medicoRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de médico no encontrado" });
+    }
+
+    const idMedico = medicoRows[0].ID_Medico;
+
+    // 3. Verificar que la cita existe y no tiene médico asignado
+    const [citaRows] = await connection.query(
+      "SELECT ID_Cita, ID_Medico, Estado FROM cita WHERE ID_Cita = ?",
+      [idCita]
+    );
+
+    if (citaRows.length === 0) {
+      return res.status(404).json({ error: "Cita no encontrada" });
+    }
+
+    const cita = citaRows[0];
+
+    if (cita.ID_Medico !== null) {
+      return res.status(400).json({ error: "Esta cita ya tiene un médico asignado" });
+    }
+
+    if (cita.Estado === 'Cancelada') {
+      return res.status(400).json({ error: "Esta cita está cancelada" });
+    }
+
+    // 4. Asignar el médico a la cita
+    await connection.query(
+      "UPDATE cita SET ID_Medico = ? WHERE ID_Cita = ?",
+      [idMedico, idCita]
+    );
+
+    res.json({ 
+      message: "Cita aceptada exitosamente",
+      id_cita: idCita,
+      id_medico: idMedico
+    });
+
+  } catch (error) {
+    console.error("Error en /api/citas/aceptar:", error);
+    res.status(500).json({ error: "Error al aceptar la cita" });
+  } finally {
+    connection.release();
+  }
+});
+
+// GET /api/citas/mis-citas-medico
+// Obtiene todas las citas asignadas al médico autenticado
+app.get("/api/citas/mis-citas-medico", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+      return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden acceder." });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Medico
+    const [medicoRows] = await connection.query(
+      "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (medicoRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de médico no encontrado" });
+    }
+
+    const idMedico = medicoRows[0].ID_Medico;
+
+    // 3. Obtener todas las citas del médico
+    const [citas] = await connection.query(
+      `SELECT 
+        c.ID_Cita,
+        c.Fecha,
+        c.Hora,
+        c.Estado,
+        c.Notas,
+        s.Nombre AS Servicio,
+        p.Nombre AS Paciente_Nombre,
+        p.Telefono AS Paciente_Telefono,
+        p.Correo AS Paciente_Correo
+      FROM cita c
+      INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+      INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+      WHERE c.ID_Medico = ?
+        AND c.Estado != 'Cancelada'
+        AND c.Fecha >= CURDATE()
+      ORDER BY c.Fecha, c.Hora`,
+      [idMedico]
+    );
+
+    res.json(citas);
+
+  } catch (error) {
+    console.error("Error en /api/citas/mis-citas-medico:", error);
+    res.status(500).json({ error: "Error al obtener las citas del médico" });
+  } finally {
+    connection.release();
+  }
+});
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
