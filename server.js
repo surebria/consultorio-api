@@ -17,7 +17,7 @@ app.use(express.json());
 const checkJwt = auth({
   audience: 'https://dev-7iloabq8ips3sdq0.us.auth0.com/api/v2/',
   issuerBaseURL: 'https://dev-7iloabq8ips3sdq0.us.auth0.com/',
-  tokenSigningAlg: 'RS256'
+  tokenSigningAlg: process.env.AUTH0_TOKEN_SIGNING_ALG
 });
 
 // Conexión a MySQL con promises
@@ -268,24 +268,26 @@ app.get("/api/servicios", async (req, res) => {
   });
 
   app.get("/api/citas/disponibilidad/:id_servicio/:fecha", async (req, res) => {
-    const { id_servicio, fecha } = req.params;
+      const { id_servicio, fecha } = req.params;
+      
+      const connection = await pool.getConnection();
+      try {
+        // Obtener TODAS las horas ocupadas para esa fecha,
+        // independientemente del servicio, para evitar conflictos de horario
+        const [citasOcupadas] = await connection.query(
+          `SELECT TIME_FORMAT(Hora, '%H:%i') as hora 
+          FROM cita 
+          WHERE Fecha = ? AND Estado != 'Cancelada'`,
+          [fecha]
+        );
     
-    const connection = await pool.getConnection();
-    try {
-      // Obtener las horas ya ocupadas para ese servicio y fecha
-      const [citasOcupadas] = await connection.query(
-        "SELECT TIME_FORMAT(Hora, '%H:%i') as hora FROM cita WHERE ID_Servicio = ? AND Fecha = ?",
-        [id_servicio, fecha]
-      );
-  
-      // Devolver las horas ocupadas (el frontend se encarga de filtrar las disponibles)
-      res.json({ horas_ocupadas: citasOcupadas });
-    } catch (error) {
-      console.error("Error en /api/citas/disponibilidad:", error);
-      res.status(500).json({ error: "Error al obtener la disponibilidad" });
-    } finally {
-      connection.release();
-    }
+        res.json({ horas_ocupadas: citasOcupadas });
+      } catch (error) {
+        console.error("Error en /api/citas/disponibilidad:", error);
+        res.status(500).json({ error: "Error al obtener la disponibilidad" });
+      } finally {
+        connection.release();
+      }
   });
   // server.js (Reemplazar la ruta POST /api/citas/agendar)
 
@@ -591,17 +593,17 @@ app.post("/api/citas/agendar", checkJwt, async (req, res) => {
 
     const idPaciente = pacienteRows[0].ID_Paciente;
 
-    // 3. Verificar que el horario esté disponible
+    // Verificar que el horario esté disponible para CUALQUIER servicio
     const [citasExistentes] = await connection.query(
-      "SELECT ID_Cita FROM cita WHERE ID_Servicio = ? AND Fecha = ? AND Hora = ? AND Estado != 'Cancelada'",
-      [id_servicio, fecha, hora]
+      "SELECT ID_Cita FROM cita WHERE Fecha = ? AND Hora = ? AND Estado != 'Cancelada'",
+      [fecha, hora]
     );
 
     if (citasExistentes.length > 0) {
       return res.status(400).json({ error: "Este horario ya no está disponible" });
     }
 
-    // 🔹 4. Insertar la cita sin asignar médico (ID_Medico = NULL)
+    // 4. Insertar la cita sin asignar médico (ID_Medico = NULL)
     const [result] = await connection.query(
       `INSERT INTO cita (Fecha, Hora, Notas, ID_Paciente, ID_Medico, ID_Servicio, Estado) 
        VALUES (?, ?, ?, ?, NULL, ?, 'Agendada')`,
