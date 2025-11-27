@@ -267,28 +267,151 @@ app.get("/api/servicios", async (req, res) => {
     }
   });
 
-  app.get("/api/citas/disponibilidad/:id_servicio/:fecha", async (req, res) => {
-      const { id_servicio, fecha } = req.params;
+  // app.get("/api/citas/disponibilidad/:id_servicio/:fecha", async (req, res) => {
+  //     const { id_servicio, fecha } = req.params;
       
-      const connection = await pool.getConnection();
-      try {
-        // Obtener TODAS las horas ocupadas para esa fecha,
-        // independientemente del servicio, para evitar conflictos de horario
-        const [citasOcupadas] = await connection.query(
-          `SELECT TIME_FORMAT(Hora, '%H:%i') as hora 
-          FROM cita 
-          WHERE Fecha = ? AND Estado != 'Cancelada'`,
-          [fecha]
-        );
+  //     const connection = await pool.getConnection();
+  //     try {
+  //       // Obtener TODAS las horas ocupadas para esa fecha,
+  //       // independientemente del servicio, para evitar conflictos de horario
+  //       const [citasOcupadas] = await connection.query(
+  //         `SELECT TIME_FORMAT(Hora, '%H:%i') as hora 
+  //         FROM cita 
+  //         WHERE Fecha = ? AND Estado != 'Cancelada'`,
+  //         [fecha]
+  //       );
     
-        res.json({ horas_ocupadas: citasOcupadas });
-      } catch (error) {
-        console.error("Error en /api/citas/disponibilidad:", error);
-        res.status(500).json({ error: "Error al obtener la disponibilidad" });
-      } finally {
-        connection.release();
-      }
-  });
+  //       res.json({ horas_ocupadas: citasOcupadas });
+  //     } catch (error) {
+  //       console.error("Error en /api/citas/disponibilidad:", error);
+  //       res.status(500).json({ error: "Error al obtener la disponibilidad" });
+  //     } finally {
+  //       connection.release();
+  //     }
+  // });
+
+  // Endpoint para obtener la lista de médicos
+
+app.get("/api/medicos", async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const [medicos] = await connection.query(
+      `SELECT ID_Medico, Nombre, Apellidos
+       FROM medico 
+       ORDER BY Nombre`
+    );
+    
+    res.json(medicos);
+  } catch (error) {
+    console.error("Error en /api/medicos:", error);
+    res.status(500).json({ error: "Error al obtener médicos" });
+  } finally {
+    connection.release();
+  }
+});
+
+// Endpoint de disponibilidad actualizado (ahora verifica por médico Y fecha)
+app.get("/api/citas/disponibilidad/:id_medico/:fecha", async (req, res) => {
+  const { id_medico, fecha } = req.params;
+  
+  const connection = await pool.getConnection();
+  try {
+    // Obtener las horas ocupadas para ese médico en esa fecha específica
+    const [citasOcupadas] = await connection.query(
+      `SELECT TIME_FORMAT(Hora, '%H:%i') as hora 
+       FROM cita 
+       WHERE ID_Medico = ? AND Fecha = ? AND Estado != 'Cancelada'`,
+      [id_medico, fecha]
+    );
+
+    res.json({ horas_ocupadas: citasOcupadas });
+  } catch (error) {
+    console.error("Error en /api/citas/disponibilidad:", error);
+    res.status(500).json({ error: "Error al obtener la disponibilidad" });
+  } finally {
+    connection.release();
+  }
+});
+
+// Endpoint de agendar cita actualizado (ahora incluye ID_Medico)
+app.post("/api/citas/agendar", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    const auth0Id = req.auth.payload.sub;
+    const { fecha, hora, id_servicio, id_medico, notas } = req.body;
+
+    // Validar que se haya enviado el ID del médico
+    if (!id_medico) {
+      return res.status(400).json({ error: "Debe seleccionar un médico" });
+    }
+
+    // 1. Obtener el ID_Usuario de Auth0
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Paciente
+    const [pacienteRows] = await connection.query(
+      "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (pacienteRows.length === 0) {
+      return res.status(404).json({ 
+        error: "Perfil de paciente no encontrado. Por favor, complete su perfil primero." 
+      });
+    }
+
+    const idPaciente = pacienteRows[0].ID_Paciente;
+
+    // 3. Verificar que el médico esté disponible en ese horario
+    const [citasExistentes] = await connection.query(
+      `SELECT ID_Cita FROM cita 
+       WHERE ID_Medico = ? AND Fecha = ? AND Hora = ? AND Estado != 'Cancelada'`,
+      [id_medico, fecha, hora]
+    );
+
+    if (citasExistentes.length > 0) {
+      return res.status(400).json({ 
+        error: "Este médico ya tiene una cita agendada en ese horario" 
+      });
+    }
+
+    // 4. Insertar la cita
+    const [result] = await connection.query(
+      `INSERT INTO cita (Fecha, Hora, Notas, ID_Paciente, ID_Medico, ID_Servicio, Estado) 
+       VALUES (?, ?, ?, ?, ?, ?, 'Agendada')`,
+      [fecha, hora, notas, idPaciente, id_medico, id_servicio]
+    );
+
+    res.json({ 
+      message: "Cita agendada exitosamente",
+      id_cita: result.insertId
+    });
+
+  } catch (error) {
+    console.error("Error en /api/citas/agendar:", error);
+    res.status(500).json({ error: "Error al agendar la cita" });
+  } finally {
+    connection.release();
+  }
+});
+
+
+
+
+
+
+
   // server.js (Reemplazar la ruta POST /api/citas/agendar)
 
 // ====================
@@ -562,66 +685,66 @@ app.post("/api/citas/agendar", checkJwt, async (req, res) => {
   }
 });*/
 
-app.post("/api/citas/agendar", checkJwt, async (req, res) => {
-  const connection = await pool.getConnection();
+// app.post("/api/citas/agendar", checkJwt, async (req, res) => {
+//   const connection = await pool.getConnection();
   
-  try {
-    const auth0Id = req.auth.payload.sub;
-    const { fecha, hora, id_servicio, notas } = req.body;
+//   try {
+//     const auth0Id = req.auth.payload.sub;
+//     const { fecha, hora, id_servicio, notas } = req.body;
 
-    // 1. Obtener el ID_Usuario de Auth0
-    const [userRows] = await connection.query(
-      "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
-      [auth0Id]
-    );
+//     // 1. Obtener el ID_Usuario de Auth0
+//     const [userRows] = await connection.query(
+//       "SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?",
+//       [auth0Id]
+//     );
 
-    if (userRows.length === 0) {
-      return res.status(404).json({ error: "Usuario no encontrado" });
-    }
+//     if (userRows.length === 0) {
+//       return res.status(404).json({ error: "Usuario no encontrado" });
+//     }
 
-    const userId = userRows[0].ID_Usuario;
+//     const userId = userRows[0].ID_Usuario;
 
-    // 2. Obtener el ID_Paciente
-    const [pacienteRows] = await connection.query(
-      "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
-      [userId]
-    );
+//     // 2. Obtener el ID_Paciente
+//     const [pacienteRows] = await connection.query(
+//       "SELECT ID_Paciente FROM paciente WHERE ID_Usuario_Auth = ?",
+//       [userId]
+//     );
 
-    if (pacienteRows.length === 0) {
-      return res.status(404).json({ error: "Perfil de paciente no encontrado. Por favor, complete su perfil primero." });
-    }
+//     if (pacienteRows.length === 0) {
+//       return res.status(404).json({ error: "Perfil de paciente no encontrado. Por favor, complete su perfil primero." });
+//     }
 
-    const idPaciente = pacienteRows[0].ID_Paciente;
+//     const idPaciente = pacienteRows[0].ID_Paciente;
 
-    // Verificar que el horario esté disponible para CUALQUIER servicio
-    const [citasExistentes] = await connection.query(
-      "SELECT ID_Cita FROM cita WHERE Fecha = ? AND Hora = ? AND Estado != 'Cancelada'",
-      [fecha, hora]
-    );
+//     // Verificar que el horario esté disponible para CUALQUIER servicio
+//     const [citasExistentes] = await connection.query(
+//       "SELECT ID_Cita FROM cita WHERE Fecha = ? AND Hora = ? AND Estado != 'Cancelada'",
+//       [fecha, hora]
+//     );
 
-    if (citasExistentes.length > 0) {
-      return res.status(400).json({ error: "Este horario ya no está disponible" });
-    }
+//     if (citasExistentes.length > 0) {
+//       return res.status(400).json({ error: "Este horario ya no está disponible" });
+//     }
 
-    // 4. Insertar la cita sin asignar médico (ID_Medico = NULL)
-    const [result] = await connection.query(
-      `INSERT INTO cita (Fecha, Hora, Notas, ID_Paciente, ID_Medico, ID_Servicio, Estado) 
-       VALUES (?, ?, ?, ?, NULL, ?, 'Agendada')`,
-      [fecha, hora, notas, idPaciente, id_servicio]
-    );
+//     // 4. Insertar la cita sin asignar médico (ID_Medico = NULL)
+//     const [result] = await connection.query(
+//       `INSERT INTO cita (Fecha, Hora, Notas, ID_Paciente, ID_Medico, ID_Servicio, Estado) 
+//        VALUES (?, ?, ?, ?, NULL, ?, 'Agendada')`,
+//       [fecha, hora, notas, idPaciente, id_servicio]
+//     );
 
-    res.json({ 
-      message: "Cita agendada exitosamente (sin médico asignado)",
-      id_cita: result.insertId
-    });
+//     res.json({ 
+//       message: "Cita agendada exitosamente (sin médico asignado)",
+//       id_cita: result.insertId
+//     });
 
-  } catch (error) {
-    console.error("Error en /api/citas/agendar:", error);
-    res.status(500).json({ error: "Error al agendar la cita" });
-  } finally {
-    connection.release();
-  }
-});
+//   } catch (error) {
+//     console.error("Error en /api/citas/agendar:", error);
+//     res.status(500).json({ error: "Error al agendar la cita" });
+//   } finally {
+//     connection.release();
+//   }
+// });
 
 // ====================
 // RUTAS DE CITAS PARA MÉDICOS
