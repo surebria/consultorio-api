@@ -841,6 +841,114 @@ app.get("/api/citas/mis-citas-medico", checkJwt, async (req, res) => {
     connection.release();
   }
 });
+// server.js (Nuevas rutas para Pacientes)
+
+// ====================
+// RUTAS DE PACIENTES PARA MÉDICOS
+// ====================
+
+// GET /api/medico/mis-pacientes
+// Obtiene la lista única de pacientes asignados al médico autenticado
+app.get("/api/medico/mis-pacientes", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+
+  try {
+    const auth0Id = req.auth.payload.sub;
+
+    // 1. Obtener el ID_Usuario y verificar el Rol (como en otras rutas)
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+      return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden acceder." });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+
+    // 2. Obtener el ID_Medico
+    const [medicoRows] = await connection.query(
+      "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+
+    if (medicoRows.length === 0) {
+      return res.status(404).json({ error: "Perfil de médico no encontrado" });
+    }
+
+    const idMedico = medicoRows[0].ID_Medico;
+
+    // 3. Consulta: Obtener la lista de pacientes únicos a partir de citas donde el médico está asignado y la cita no está Cancelada.
+    const [pacientes] = await connection.query(
+      `SELECT DISTINCT
+        p.ID_Paciente,
+        p.Nombre
+      FROM cita c
+      INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+      WHERE c.ID_Medico = ? 
+        AND c.Estado != 'Cancelada'
+      ORDER BY p.Nombre`,
+      [idMedico]
+    );
+
+    res.json(pacientes);
+
+  } catch (error) {
+    console.error("Error en /api/medico/mis-pacientes:", error);
+    res.status(500).json({ error: "Error al obtener la lista de pacientes" });
+  } finally {
+    connection.release();
+  }
+});
+
+
+// GET /api/paciente/:id_paciente
+// Obtiene la información completa de un paciente por su ID
+app.get("/api/paciente/:id_paciente", checkJwt, async (req, res) => {
+    const connection = await pool.getConnection();
+    
+    try {
+        const idPaciente = req.params.id_paciente;
+
+        // 1. Verificar que el usuario es médico (por seguridad)
+        const auth0Id = req.auth.payload.sub;
+        const [userRows] = await connection.query(
+            "SELECT Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+            [auth0Id]
+        );
+
+        if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+            return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden acceder a la información de pacientes." });
+        }
+
+        // 2. Obtener la información del paciente
+        // NOTA: Se excluyen Contraseña e ID_Usuario_Auth
+        const [pacienteRows] = await connection.query(
+            `SELECT 
+                ID_Paciente, Nombre, Sexo, FechaNacimiento, Direccion, Codigo_Postal, 
+                Ciudad, Ocupacion, Telefono, Correo
+             FROM paciente 
+             WHERE ID_Paciente = ?`,
+            [idPaciente]
+        );
+
+        if (pacienteRows.length === 0) {
+            return res.status(404).json({ error: "Paciente no encontrado" });
+        }
+
+        res.json(pacienteRows[0]);
+
+    } catch (error) {
+        console.error("Error en /api/paciente/:id_paciente:", error);
+        res.status(500).json({ error: "Error al obtener la información del paciente" });
+    } finally {
+        connection.release();
+    }
+});
+
+
+
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
