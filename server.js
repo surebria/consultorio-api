@@ -4,15 +4,19 @@ const dotenv = require("dotenv");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
 const { auth } = require('express-oauth2-jwt-bearer');
+const sgMail = require('@sendgrid/mail');
 
 // Cargar variables del .env
 dotenv.config();
-
+// Configurar SendGrid API Key
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 // Crear app express
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const CONTACTO_AGS = '449 912 0000'; 
+const CORREO_REMITENTE_VERIFICADO = 'sonrisasfelicesdental@outlook.com'; 
 // Middleware de autenticación de Auth0
 const checkJwt = auth({
   audience: 'https://dev-7iloabq8ips3sdq0.us.auth0.com/api/v2/',
@@ -335,7 +339,8 @@ app.get("/api/citas/disponibilidad/:id_medico/:fecha", async (req, res) => {
 });
 
 // Endpoint de agendar cita actualizado (ahora incluye ID_Medico)
-app.post("/api/citas/agendar", checkJwt, async (req, res) => {
+//ESTA ES LA QUE FUNCIONA VALERIA
+/*app.post("/api/citas/agendar", checkJwt, async (req, res) => {
   const connection = await pool.getConnection();
   
   try {
@@ -404,13 +409,137 @@ app.post("/api/citas/agendar", checkJwt, async (req, res) => {
   } finally {
     connection.release();
   }
+});*/
+
+app.post("/api/citas/agendar", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+      const auth0Id = req.auth.payload.sub;
+      const { fecha, hora, id_servicio, id_medico, notas } = req.body;
+
+      // 1. Obtener ID_Paciente
+      const [pacienteRows] = await connection.query(
+          "SELECT ID_Paciente, Nombre, Correo FROM paciente WHERE ID_Usuario_Auth = (SELECT ID_Usuario FROM usuario_auth0 WHERE Auth0_ID = ?)",
+          [auth0Id]
+      );
+
+      if (pacienteRows.length === 0) {
+          return res.status(404).json({ error: "Perfil de paciente no encontrado" });
+      }
+      const idPaciente = pacienteRows[0].ID_Paciente;
+      const pacienteNombre = pacienteRows[0].Nombre;
+      const pacienteCorreo = pacienteRows[0].Correo;
+
+
+      // 2. Insertar la nueva cita en estado 'Agendada'
+      const [result] = await connection.query(
+        "INSERT INTO cita (Fecha, Hora, Estado, Notas, ID_Paciente, ID_Medico, ID_Servicio) VALUES (?, ?, 'Agendada', ?, ?, ?, ?)",
+        [fecha, hora, notas, idPaciente, id_medico, id_servicio] // 6 variables para 6 placeholders
+      );
+      const idCita = result.insertId;
+
+      // 3. Obtener detalles completos de la cita, servicio y médico
+      const [citaDetalleRows] = await connection.query(
+          `SELECT 
+              c.Fecha AS Fecha, 
+              c.Hora AS Hora, 
+              s.Nombre AS Servicio_Nombre,
+              m.Nombre AS Medico_Nombre,
+              m.Apellidos AS Medico_Apellidos
+           FROM cita c
+           INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+           INNER JOIN medico m ON c.ID_Medico = m.ID_Medico
+           WHERE c.ID_Cita = ?`,
+          [idCita]
+      );
+
+
+      const detalles = citaDetalleRows[0];
+      const medicoNombreCompleto = `Dr(a). ${detalles.Medico_Nombre} ${detalles.Medico_Apellidos}`;
+      
+      // 4. Enviar el correo de confirmación con SendGrid
+      const msg = {
+          to: pacienteCorreo,
+          from: CORREO_REMITENTE_VERIFICADO, 
+          subject: 'Solicitud Recibida: Tu Cita Médica está en Espera de Confirmación',
+          html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
+                  
+                  <div style="background-color: #007bff; color: white; padding: 20px; text-align: center;">
+                      <h2 style="margin: 0; font-size: 24px;">¡Solicitud de Cita Recibida!</h2>
+                      <p style="margin: 5px 0 0;">Estamos procesando tu reservación.</p>
+                  </div>
+
+                  <div style="padding: 30px;">
+                      <h3 style="color: #333;">Hola ${pacienteNombre},</h3>
+                      <p style="font-size: 16px; color: #555; line-height: 1.5;">
+                          Tu solicitud de cita ha sido agendada exitosamente y está pendiente de confirmación por el médico. Una vez que el Dr(a). ${detalles.Medico_Apellidos} la revise, recibirás un correo de confirmación final.
+                      </p>
+
+                      <div style="background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 15px; margin: 20px 0;">
+                          <h4 style="color: #007bff; margin-top: 0; border-bottom: 2px solid #007bff; padding-bottom: 5px;">Detalles de tu Cita</h4>
+                          <table style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Servicio:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Servicio_Nombre}</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Fecha:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Fecha}</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Hora:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Hora.slice(0, 5)} hrs</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Médico:</td>
+                                  <td style="padding: 8px 0; color: #555;">${medicoNombreCompleto}</td>
+                              </tr>
+                          </table>
+                      </div>
+                      
+                      <div style="margin-top: 25px; border-top: 1px solid #ddd; padding-top: 15px;">
+                          <p style="font-size: 14px; color: #dc3545; font-weight: bold; margin-bottom: 5px;">⚠️ Cancelaciones y Dudas</p>
+                          <p style="font-size: 14px; color: #555;">
+                              Si necesitas cancelar tu cita o tienes alguna sugerencia o pregunta urgente, por favor, contáctanos lo antes posible al siguiente número:
+                          </p>
+                          <p style="font-size: 18px; color: #007bff; font-weight: bold; text-align: center; margin: 15px 0;">
+                              📞 Teléfono (Aguascalientes): ${CONTACTO_AGS}
+                          </p>
+                      </div>
+                      
+                  </div>
+
+                  <div style="background-color: #f1f1f1; color: #777; padding: 15px; text-align: center; font-size: 12px;">
+                      <p style="margin: 0;">Gracias por confiar en ${CORREO_REMITENTE_VERIFICADO.split('@')[1]}.</p>
+                      <p style="margin: 5px 0 0;">Este es un correo automático, por favor no lo respondas.</p>
+                  </div>
+              </div>
+          `,
+      };
+      
+
+      try {
+          await sgMail.send(msg);
+          console.log("Correo de agendamiento enviado a:", pacienteCorreo);
+      } catch (error) {
+          console.error("ADVERTENCIA: Falló el envío de correo de agendamiento con SendGrid:", error.response ? error.response.body.errors : error);
+          // El error de correo no debe detener la confirmación de la cita
+      }
+
+      // 5. Respuesta final
+      res.status(201).json({ 
+          message: "Cita agendada exitosamente",
+          id_cita: idCita
+      });
+
+  } catch (error) {
+      console.error("Error en /api/citas/agendar:", error);
+      res.status(500).json({ error: "Error al agendar la cita" });
+  } finally {
+      connection.release();
+  }
 });
-
-
-
-
-
-
 
   // server.js (Reemplazar la ruta POST /api/citas/agendar)
 
@@ -883,23 +1012,274 @@ app.post("/api/citas/aceptar/:id_cita", checkJwt, async (req, res) => {
       return res.status(400).json({ error: "Esta cita está cancelada" });
     }
 
-    // 4. Asignar el médico a la cita
+    // 4. Asignar el médico y cambiar el estado a 'Confirmada'
     await connection.query(
-      "UPDATE cita SET ID_Medico = ? WHERE ID_Cita = ?",
+      "UPDATE cita SET ID_Medico = ?, Estado = 'Confirmada' WHERE ID_Cita = ?",
       [idMedico, idCita]
     );
 
-    res.json({ 
-      message: "Cita aceptada exitosamente",
-      id_cita: idCita,
-      id_medico: idMedico
-    });
+    // 5. Obtener los detalles completos de la cita, paciente, servicio y médico
+    // *** CORRECCIÓN APLICADA: Usando c.Fecha y c.Hora ***
+    const [citaDetalleRows] = await connection.query(
+        `SELECT 
+            c.Fecha AS Fecha,  /* <-- USANDO EL NOMBRE DE COLUMNA CORRECTO */
+            c.Hora AS Hora,    /* <-- USANDO EL NOMBRE DE COLUMNA CORRECTO */
+            p.Correo AS Paciente_Correo,
+            p.Nombre AS Paciente_Nombre,
+            s.Nombre AS Servicio_Nombre,
+            m.Nombre AS Medico_Nombre,
+            m.Apellidos AS Medico_Apellidos
+         FROM cita c
+         INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+         INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+         INNER JOIN medico m ON c.ID_Medico = m.ID_Medico
+         WHERE c.ID_Cita = ?`,
+        [idCita]
+    );
+
+    // Si la corrección es correcta, este bloque ahora será saltado:
+    if (citaDetalleRows.length === 0) {
+        console.error("No se encontraron detalles para enviar el correo de confirmación de la cita:", idCita);
+        return res.status(500).json({ message: "Cita aceptada y confirmada. Error interno al obtener datos para el correo." });
+    }
+
+    const detalles = citaDetalleRows[0];
+    const medicoNombreCompleto = `Dr(a). ${detalles.Medico_Nombre} ${detalles.Medico_Apellidos}`;
+    
+    // 6. Preparar y Enviar el correo de confirmación con SendGrid
+    // ... (El resto del código de SendGrid que ya tenías) ...
+    const msg = {
+      to: detalles.Paciente_Correo,
+      // NOTA: Usar la constante si la definiste, o el correo verificado directamente.
+      from: 'sonrisasfelicesdental@outlook.com', 
+      subject: '¡Cita Confirmada! Tu cita dental ha sido aceptada',
+      html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+              
+              <div style="background-color: #28a745; color: white; padding: 25px 20px; text-align: center;">
+                  <h2 style="margin: 0; font-size: 26px;">¡Cita Confirmada!</h2>
+                  <p style="margin: 5px 0 0; font-size: 16px;">Tu reservación ha sido aceptada por el médico.</p>
+              </div>
+  
+              <div style="padding: 30px;">
+                  <h3 style="color: #333;">Hola ${detalles.Paciente_Nombre},</h3>
+                  <p style="font-size: 16px; color: #555; line-height: 1.5;">
+                      El Dr(a). ${medicoNombreCompleto} ha aceptado y confirmado tu cita. Te esperamos en la fecha y hora indicadas a continuación.
+                  </p>
+  
+                  <div style="background-color: #e6f9ed; border: 1px solid #c3e6cb; border-radius: 6px; padding: 15px; margin: 20px 0;">
+                      <h4 style="color: #28a745; margin-top: 0; border-bottom: 2px solid #28a745; padding-bottom: 5px;">Detalles de tu Cita</h4>
+                      <table style="width: 100%; border-collapse: collapse;">
+                          <tr>
+                              <td style="padding: 8px 0; font-weight: bold; color: #333; width: 40%;">Servicio:</td>
+                              <td style="padding: 8px 0; color: #555;">${detalles.Servicio_Nombre}</td>
+                          </tr>
+                          <tr>
+                              <td style="padding: 8px 0; font-weight: bold; color: #333;">Fecha:</td>
+                              <td style="padding: 8px 0; color: #555;">${detalles.Fecha}</td>
+                          </tr>
+                          <tr>
+                              <td style="padding: 8px 0; font-weight: bold; color: #333;">Hora:</td>
+                              <td style="padding: 8px 0; color: #555;">${detalles.Hora.slice(0, 5)} hrs</td>
+                          </tr>
+                          <tr>
+                              <td style="padding: 8px 0; font-weight: bold; color: #333;">Médico:</td>
+                              <td style="padding: 8px 0; color: #555;">${medicoNombreCompleto}</td>
+                          </tr>
+                      </table>
+                  </div>
+                  
+                  <div style="margin-top: 25px; border-top: 1px solid #ddd; padding-top: 15px;">
+                      <p style="font-size: 14px; color: #dc3545; font-weight: bold; margin-bottom: 5px;">⚠️ Cancelaciones y Dudas</p>
+                      <p style="font-size: 14px; color: #555;">
+                          Si necesitas cancelar o realizar un cambio en tu cita, por favor, notifícanos lo antes posible.
+                      </p>
+                      <p style="font-size: 18px; color: #28a745; font-weight: bold; text-align: center; margin: 15px 0;">
+                          📞 Contacto: ${CONTACTO_AGS}
+                      </p>
+                  </div>
+                  
+              </div>
+  
+              <div style="background-color: #f1f1f1; color: #777; padding: 15px; text-align: center; font-size: 12px;">
+                  <p style="margin: 0;">Gracias por tu preferencia.</p>
+                  <p style="margin: 5px 0 0;">Este es un correo automático, por favor no lo respondas.</p>
+              </div>
+          </div>
+      `,
+  };
+
+    try {
+        await sgMail.send(msg);
+        console.log("Correo de confirmación enviado a:", detalles.Paciente_Correo);
+        // Respuesta exitosa que activará la recarga en el frontend
+        res.status(200).json({ message: "Cita aceptada, confirmada y correo de notificación enviado exitosamente" });
+    } catch (error) {
+        console.error("Error al enviar el correo con SendGrid:", error.response ? error.response.body.errors : error);
+        // Se mantiene el status 200 para que el frontend recargue, pero con una advertencia
+        res.status(200).json({ message: "Cita aceptada y confirmada exitosamente. ADVERTENCIA: Falló el envío de correo de notificación." });
+    }
 
   } catch (error) {
-    console.error("Error en /api/citas/aceptar:", error);
-    res.status(500).json({ error: "Error al aceptar la cita" });
+    // ... (Manejo de errores si falló la base de datos o validación)
   } finally {
     connection.release();
+  }
+});
+
+//confirmar cita ya asignada
+// Permite al médico confirmar una cita ya asignada y cambiar su estado
+app.post("/api/citas/confirmar/:id_cita", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+
+  try {
+      const auth0Id = req.auth.payload.sub;
+      const idCita = req.params.id_cita;
+
+      // 1. Obtener el ID_Usuario y ID_Medico
+      const [userRows] = await connection.query(
+          "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+          [auth0Id]
+      );
+
+      if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+          return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden confirmar citas." });
+      }
+
+      const userId = userRows[0].ID_Usuario;
+      const [medicoRows] = await connection.query(
+          "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+          [userId]
+      );
+      const idMedico = medicoRows[0].ID_Medico;
+
+      // 2. Verificar que la cita existe, que está asignada a ESTE médico y que el estado es 'Agendada'
+      const [citaRows] = await connection.query(
+          "SELECT ID_Cita, ID_Medico, Estado FROM cita WHERE ID_Cita = ?",
+          [idCita]
+      );
+
+      if (citaRows.length === 0) {
+          return res.status(404).json({ error: "Cita no encontrada" });
+      }
+
+      const cita = citaRows[0];
+
+      // *** CAMBIO CLAVE ***: Debe estar asignada al médico actual y en estado 'Agendada'
+      if (cita.ID_Medico != idMedico) {
+          return res.status(403).json({ error: "No tienes permiso para confirmar esta cita." });
+      }
+      
+      if (cita.Estado !== 'Agendada') {
+          return res.status(400).json({ error: `La cita no se puede confirmar, su estado actual es: ${cita.Estado}` });
+      }
+
+      // 3. Cambiar el estado a 'Confirmada' (No se cambia el ID_Medico, ya está asignado)
+      await connection.query(
+          "UPDATE cita SET Estado = 'Confirmada' WHERE ID_Cita = ?",
+          [idCita]
+      );
+
+      // 4. Obtener los detalles completos para el correo
+      // ... (Tu consulta SQL y lógica de SendGrid - usa la que ya tenías)
+      // [CÓDIGO SQL Y SENDGRID DE TU RUTA ANTERIOR]
+
+      const [citaDetalleRows] = await connection.query(
+          // ... (Tu consulta de SELECT con JOIN para paciente, servicio y medico) ...
+          // Usa tu consulta que ya tienes...
+          `SELECT 
+              c.Fecha AS Fecha, 
+              c.Hora AS Hora, 
+              p.Correo AS Paciente_Correo,
+              p.Nombre AS Paciente_Nombre,
+              s.Nombre AS Servicio_Nombre,
+              m.Nombre AS Medico_Nombre,
+              m.Apellidos AS Medico_Apellidos
+           FROM cita c
+           INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+           INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+           INNER JOIN medico m ON c.ID_Medico = m.ID_Medico
+           WHERE c.ID_Cita = ?`,
+          [idCita]
+      );
+      
+      if (citaDetalleRows.length === 0) {
+          console.error("No se encontraron detalles para enviar el correo de confirmación de la cita:", idCita);
+          return res.status(200).json({ message: "Cita confirmada. Error interno al obtener datos para el correo." });
+      }
+
+      const detalles = citaDetalleRows[0];
+      const medicoNombreCompleto = `${detalles.Medico_Nombre} ${detalles.Medico_Apellidos}`;
+      
+      // 5. Preparar y Enviar el correo de confirmación con SendGrid
+      // ... (Tu lógica de SendGrid)
+      const sgMail = require('@sendgrid/mail');
+      // Asegúrate de que sgMail.setApiKey() esté configurado al inicio de server.js
+
+      const msg = {
+          to: detalles.Paciente_Correo,
+          from: 'sonrisasfelicesdental@outlook.com', // Usar tu correo verificado
+          subject: '¡Cita Confirmada! Tu cita dental ha sido aceptada',
+          // ... (Tu HTML completo para el correo)
+          html: `
+              <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+                  <div style="background-color: #28a745; color: white; padding: 25px 20px; text-align: center;">
+                      <h2 style="margin: 0; font-size: 26px;">¡Cita Confirmada!</h2>
+                      <p style="margin: 5px 0 0; font-size: 16px;">Tu reservación ha sido aceptada por el médico.</p>
+                  </div>
+      
+                  <div style="padding: 30px;">
+                      <h3 style="color: #333;">Hola ${detalles.Paciente_Nombre},</h3>
+                      <p style="font-size: 16px; color: #555; line-height: 1.5;">
+                          El Dr(a). ${medicoNombreCompleto} ha confirmado tu cita. Te esperamos en la fecha y hora indicadas a continuación.
+                      </p>
+      
+                      <div style="background-color: #e6f9ed; border: 1px solid #c3e6cb; border-radius: 6px; padding: 15px; margin: 20px 0;">
+                          <h4 style="color: #28a745; margin-top: 0; border-bottom: 2px solid #28a745; padding-bottom: 5px;">Detalles de tu Cita</h4>
+                          <table style="width: 100%; border-collapse: collapse;">
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333; width: 40%;">Servicio:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Servicio_Nombre}</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Fecha:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Fecha}</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Hora:</td>
+                                  <td style="padding: 8px 0; color: #555;">${detalles.Hora.slice(0, 5)} hrs</td>
+                              </tr>
+                              <tr>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Médico:</td>
+                                  <td style="padding: 8px 0; color: #555;">Dr(a). ${medicoNombreCompleto}</td>
+                              </tr>
+                          </table>
+                      </div>
+                      
+                  </div>
+      
+                  <div style="background-color: #f1f1f1; color: #777; padding: 15px; text-align: center; font-size: 12px;">
+                      <p style="margin: 0;">Gracias por tu preferencia.</p>
+                      <p style="margin: 5px 0 0;">Este es un correo automático, por favor no lo respondas.</p>
+                  </div>
+              </div>
+          `,
+      };
+
+      try {
+          await sgMail.send(msg);
+          console.log("Correo de confirmación enviado a:", detalles.Paciente_Correo);
+          res.status(200).json({ message: "Cita confirmada y correo de notificación enviado exitosamente" });
+      } catch (error) {
+          console.error("Error al enviar el correo con SendGrid:", error.response ? error.response.body.errors : error);
+          res.status(200).json({ message: "Cita confirmada exitosamente. ADVERTENCIA: Falló el envío de correo de notificación." });
+      }
+
+  } catch (error) {
+      console.error("Error en /api/citas/confirmar/:id_cita:", error);
+      res.status(500).json({ error: "Error interno del servidor al confirmar la cita." });
+  } finally {
+      connection.release();
   }
 });
 
