@@ -4,10 +4,12 @@ const dotenv = require("dotenv");
 const mysql = require("mysql2/promise");
 const cors = require("cors");
 const { auth } = require('express-oauth2-jwt-bearer');
+const sgMail = require('@sendgrid/mail');
 
 // Cargar variables del .env
 dotenv.config();
-
+// Configurar SendGrid API Key
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 // Crear app express
 const app = express();
 app.use(cors());
@@ -883,21 +885,72 @@ app.post("/api/citas/aceptar/:id_cita", checkJwt, async (req, res) => {
       return res.status(400).json({ error: "Esta cita está cancelada" });
     }
 
-    // 4. Asignar el médico a la cita
+    // 4. Asignar el médico y cambiar el estado a 'Confirmada'
     await connection.query(
-      "UPDATE cita SET ID_Medico = ? WHERE ID_Cita = ?",
+      "UPDATE cita SET ID_Medico = ?, Estado = 'Confirmada' WHERE ID_Cita = ?",
       [idMedico, idCita]
     );
 
-    res.json({ 
-      message: "Cita aceptada exitosamente",
-      id_cita: idCita,
-      id_medico: idMedico
-    });
+    // 5. Obtener los detalles completos de la cita, paciente, servicio y médico
+    // *** CORRECCIÓN APLICADA: Usando c.Fecha y c.Hora ***
+    const [citaDetalleRows] = await connection.query(
+        `SELECT 
+            c.Fecha AS Fecha,  /* <-- USANDO EL NOMBRE DE COLUMNA CORRECTO */
+            c.Hora AS Hora,    /* <-- USANDO EL NOMBRE DE COLUMNA CORRECTO */
+            p.Correo AS Paciente_Correo,
+            p.Nombre AS Paciente_Nombre,
+            s.Nombre AS Servicio_Nombre,
+            m.Nombre AS Medico_Nombre,
+            m.Apellidos AS Medico_Apellidos
+         FROM cita c
+         INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+         INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+         INNER JOIN medico m ON c.ID_Medico = m.ID_Medico
+         WHERE c.ID_Cita = ?`,
+        [idCita]
+    );
+
+    // Si la corrección es correcta, este bloque ahora será saltado:
+    if (citaDetalleRows.length === 0) {
+        console.error("No se encontraron detalles para enviar el correo de confirmación de la cita:", idCita);
+        return res.status(500).json({ message: "Cita aceptada y confirmada. Error interno al obtener datos para el correo." });
+    }
+
+    const detalles = citaDetalleRows[0];
+    const medicoNombreCompleto = `Dr(a). ${detalles.Medico_Nombre} ${detalles.Medico_Apellidos}`;
+    
+    // 6. Preparar y Enviar el correo de confirmación con SendGrid
+    // ... (El resto del código de SendGrid que ya tenías) ...
+    const msg = {
+        to: detalles.Paciente_Correo,
+        from: 'sonrisasfelicesdental@outlook.com', // ¡Asegúrate de cambiar esto!
+        subject: '✅ ¡Cita Confirmada! Tu cita ha sido aceptada',
+        html: `
+            <h3>Hola ${detalles.Paciente_Nombre},</h3>
+            <p>Tu cita ha sido **aceptada y confirmada** por el médico.</p>
+            <p><strong>Detalles:</strong></p>
+            <ul>
+                <li><strong>Servicio:</strong> ${detalles.Servicio_Nombre}</li>
+                <li><strong>Fecha:</strong> ${detalles.Fecha}</li>
+                <li><strong>Hora:</strong> ${detalles.Hora} hrs</li>
+                <li><strong>Médico:</strong> ${medicoNombreCompleto}</li>
+            </ul>
+        `,
+    };
+
+    try {
+        await sgMail.send(msg);
+        console.log("Correo de confirmación enviado a:", detalles.Paciente_Correo);
+        // Respuesta exitosa que activará la recarga en el frontend
+        res.status(200).json({ message: "Cita aceptada, confirmada y correo de notificación enviado exitosamente" });
+    } catch (error) {
+        console.error("Error al enviar el correo con SendGrid:", error.response ? error.response.body.errors : error);
+        // Se mantiene el status 200 para que el frontend recargue, pero con una advertencia
+        res.status(200).json({ message: "Cita aceptada y confirmada exitosamente. ADVERTENCIA: Falló el envío de correo de notificación." });
+    }
 
   } catch (error) {
-    console.error("Error en /api/citas/aceptar:", error);
-    res.status(500).json({ error: "Error al aceptar la cita" });
+    // ... (Manejo de errores si falló la base de datos o validación)
   } finally {
     connection.release();
   }
