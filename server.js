@@ -1282,7 +1282,161 @@ app.post("/api/citas/confirmar/:id_cita", checkJwt, async (req, res) => {
       connection.release();
   }
 });
+// Asegúrate de que las dependencias (pool, checkJwt, sgMail, CORREO_REMITENTE_VERIFICADO)
+// estén definidas al inicio de tu archivo server.js.
 
+// RUTA POST: /api/citas/cancelar-medico/:id_cita
+// Permite al médico cancelar una cita y cambiar su estado a 'Cancelada'.
+app.post("/api/citas/cancelar-medico/:id_cita", checkJwt, async (req, res) => {
+  const connection = await pool.getConnection();
+
+  try {
+    const auth0Id = req.auth.payload.sub;
+    const idCita = req.params.id_cita;
+
+    // 1. Obtener ID de Médico (Verificación de Rol)
+    const [userRows] = await connection.query(
+      "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+      [auth0Id]
+    );
+
+    if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+      return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden cancelar citas." });
+    }
+
+    const userId = userRows[0].ID_Usuario;
+    const [medicoRows] = await connection.query(
+      "SELECT ID_Medico, Nombre, Apellidos FROM medico WHERE ID_Usuario_Auth = ?",
+      [userId]
+    );
+    
+    // Si no tiene perfil de médico, no puede cancelar
+    if (medicoRows.length === 0) {
+        return res.status(403).json({ error: "Perfil de médico no encontrado." });
+    }
+    const idMedico = medicoRows[0].ID_Medico;
+    const medicoNombre = medicoRows[0].Nombre;
+    const medicoApellidos = medicoRows[0].Apellidos;
+    const medicoNombreCompleto = `${medicoNombre} ${medicoApellidos}`;
+
+    // 2. Verificar que la cita existe y que está asignada a ESTE médico
+    const [citaRows] = await connection.query(
+      "SELECT ID_Cita, ID_Medico, Estado FROM cita WHERE ID_Cita = ?",
+      [idCita]
+    );
+
+    if (citaRows.length === 0) {
+      return res.status(404).json({ error: "Cita no encontrada" });
+    }
+
+    const cita = citaRows[0];
+
+    if (cita.ID_Medico != idMedico) {
+      return res.status(403).json({ error: "No tienes permiso para cancelar esta cita." });
+    }
+    
+    // Solo se permite cancelar si el estado no es ya 'Cancelada' o 'Completada'
+    if (cita.Estado === 'Cancelada' || cita.Estado === 'Completada') {
+      return res.status(400).json({ error: `La cita ya está en estado: ${cita.Estado}` });
+    }
+
+    // 3. CAMBIO: Cambiar el estado a 'Cancelada'
+    await connection.query(
+      "UPDATE cita SET Estado = 'Cancelada' WHERE ID_Cita = ?",
+      [idCita]
+    );
+
+    // 4. Obtener los detalles completos para el correo
+    const [citaDetalleRows] = await connection.query(
+      `SELECT 
+          c.Fecha AS Fecha, 
+          c.Hora AS Hora, 
+          p.Correo AS Paciente_Correo,
+          p.Nombre AS Paciente_Nombre,
+          s.Nombre AS Servicio_Nombre
+        FROM cita c
+        INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
+        INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+        WHERE c.ID_Cita = ?`,
+      [idCita]
+    );
+    
+    if (citaDetalleRows.length === 0) {
+      console.error("No se encontraron detalles para enviar el correo de cancelación de la cita:", idCita);
+      // Aun así, retornamos éxito 200 ya que la cita YA FUE CANCELADA
+      return res.status(200).json({ message: "Cita cancelada. ADVERTENCIA: Error interno al obtener datos para el correo." });
+    }
+
+    const detalles = citaDetalleRows[0];
+    
+    // 5. Preparar y Enviar el correo de CANCELACIÓN
+    // Asegúrate de que CORREO_REMITENTE_VERIFICADO esté definido al inicio de server.js
+    const CORREO_REMITENTE_VERIFICADO = 'sonrisasfelicesdental@outlook.com'; 
+
+    const msg = {
+      to: detalles.Paciente_Correo,
+      from: CORREO_REMITENTE_VERIFICADO, 
+      subject: 'AVISO IMPORTANTE: Cita Cancelada por su Médico', 
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+            <div style="background-color: #dc3545; color: white; padding: 25px 20px; text-align: center;">
+                <h2 style="margin: 0; font-size: 26px;">Cita Cancelada</h2>
+                <p style="margin: 5px 0 0; font-size: 16px;">Lamentamos informarte que tu reservación ha sido cancelada por el médico.</p>
+            </div>
+            <div style="padding: 30px;">
+                <h3 style="color: #333;">Hola ${detalles.Paciente_Nombre},</h3>
+                <p style="font-size: 16px; color: #555; line-height: 1.5;">
+                    El Dr(a). **${medicoNombreCompleto}** ha **cancelado** la cita que tenías agendada para el siguiente servicio.
+                </p>
+                <div style="background-color: #fce8e9; border: 1px solid #dc3545; border-radius: 6px; padding: 15px; margin: 20px 0;">
+                    <h4 style="color: #dc3545; margin-top: 0; border-bottom: 2px solid #dc3545; padding-bottom: 5px;">Detalles de la Cita Cancelada</h4>
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr>
+                            <td style="padding: 8px 0; font-weight: bold; color: #333; width: 40%;">Servicio:</td>
+                            <td style="padding: 8px 0; color: #555;">${detalles.Servicio_Nombre}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; font-weight: bold; color: #333;">Fecha:</td>
+                            <td style="padding: 8px 0; color: #555;">${detalles.Fecha}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; font-weight: bold; color: #333;">Hora:</td>
+                            <td style="padding: 8px 0; color: #555;">${detalles.Hora.slice(0, 5)} hrs</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 8px 0; font-weight: bold; color: #333;">Médico:</td>
+                            <td style="padding: 8px 0; color: #555;">Dr(a). ${medicoNombreCompleto}</td>
+                        </tr>
+                    </table>
+                </div>
+                <p style="font-size: 16px; color: #555; line-height: 1.5;">
+                    Por favor, intenta reagendar tu cita en otro horario que te sea conveniente.
+                </p>
+            </div>
+            <div style="background-color: #f1f1f1; color: #777; padding: 15px; text-align: center; font-size: 12px;">
+                <p style="margin: 0;">Lamentamos los inconvenientes.</p>
+                <p style="margin: 5px 0 0;">Este es un correo automático, por favor no lo respondas.</p>
+            </div>
+        </div>
+      `,
+    };
+
+    try {
+      await sgMail.send(msg);
+      console.log("Correo de cancelación enviado a:", detalles.Paciente_Correo);
+      res.status(200).json({ message: "Cita cancelada y correo de notificación enviado exitosamente" });
+    } catch (error) {
+      console.error("Error al enviar el correo de cancelación con SendGrid:", error.response ? error.response.body.errors : error);
+      res.status(200).json({ message: "Cita cancelada exitosamente. ADVERTENCIA: Falló el envío de correo de notificación." });
+    }
+
+  } catch (error) {
+    console.error("Error en /api/citas/cancelar-medico/:id_cita:", error);
+    res.status(500).json({ error: "Error interno del servidor al cancelar la cita." });
+  } finally {
+    connection.release();
+  }
+});
 // GET /api/citas/mis-citas-medico
 // Obtiene todas las citas asignadas al médico autenticado
 app.get("/api/citas/mis-citas-medico", checkJwt, async (req, res) => {
