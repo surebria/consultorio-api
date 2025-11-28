@@ -271,49 +271,48 @@ app.get("/api/servicios", async (req, res) => {
     }
   });
 
-  // app.get("/api/citas/disponibilidad/:id_servicio/:fecha", async (req, res) => {
-  //     const { id_servicio, fecha } = req.params;
-      
-  //     const connection = await pool.getConnection();
-  //     try {
-  //       // Obtener TODAS las horas ocupadas para esa fecha,
-  //       // independientemente del servicio, para evitar conflictos de horario
-  //       const [citasOcupadas] = await connection.query(
-  //         `SELECT TIME_FORMAT(Hora, '%H:%i') as hora 
-  //         FROM cita 
-  //         WHERE Fecha = ? AND Estado != 'Cancelada'`,
-  //         [fecha]
-  //       );
-    
-  //       res.json({ horas_ocupadas: citasOcupadas });
-  //     } catch (error) {
-  //       console.error("Error en /api/citas/disponibilidad:", error);
-  //       res.status(500).json({ error: "Error al obtener la disponibilidad" });
-  //     } finally {
-  //       connection.release();
-  //     }
-  // });
-
-  // Endpoint para obtener la lista de médicos
-
-app.get("/api/medicos", async (req, res) => {
-  const connection = await pool.getConnection();
+// app.get("/api/medicos", async (req, res) => {
+//   const connection = await pool.getConnection();
   
+//   try {
+//     const [medicos] = await connection.query(
+//       `SELECT ID_Medico, Nombre, Apellidos
+//        FROM medico 
+//        ORDER BY Nombre`
+//     );
+    
+//     res.json(medicos);
+//   } catch (error) {
+//     console.error("Error en /api/medicos:", error);
+//     res.status(500).json({ error: "Error al obtener médicos" });
+//   } finally {
+//     connection.release();
+//   }
+// });
+
+app.get("/api/medicos/servicio/:idServicio", async (req, res) => {
+  const connection = await pool.getConnection();
+  const { idServicio } = req.params;
+
   try {
     const [medicos] = await connection.query(
-      `SELECT ID_Medico, Nombre, Apellidos
-       FROM medico 
-       ORDER BY Nombre`
+      `SELECT m.ID_Medico, m.Nombre, m.Apellidos
+       FROM medico m
+       JOIN medico_servicio ms ON ms.ID_Medico = m.ID_Medico
+       WHERE ms.ID_Servicio = ?
+       ORDER BY m.Nombre`,
+       [idServicio]
     );
-    
+
     res.json(medicos);
   } catch (error) {
-    console.error("Error en /api/medicos:", error);
+    console.error("Error en /api/medicos/servicio:", error);
     res.status(500).json({ error: "Error al obtener médicos" });
   } finally {
     connection.release();
   }
 });
+
 
 // Endpoint de disponibilidad actualizado (ahora verifica por médico Y fecha)
 app.get("/api/citas/disponibilidad/:id_medico/:fecha", async (req, res) => {
