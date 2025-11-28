@@ -15,7 +15,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const CONTACTO_AGS = '449 912 0000'; 
+const CONTACTO_AGS = '4492226937'; 
 const CORREO_REMITENTE_VERIFICADO = 'sonrisasfelicesdental@outlook.com'; 
 // Middleware de autenticación de Auth0
 const checkJwt = auth({
@@ -461,26 +461,26 @@ app.post("/api/citas/agendar", checkJwt, async (req, res) => {
       const msg = {
           to: pacienteCorreo,
           from: CORREO_REMITENTE_VERIFICADO, 
-          subject: 'Solicitud Recibida: Tu Cita Médica está en Espera de Confirmación',
+          subject: '¡Cita Confirmada! Tu Cita dental ya esta agendada',
           html: `
               <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
                   
                   <div style="background-color: #007bff; color: white; padding: 20px; text-align: center;">
-                      <h2 style="margin: 0; font-size: 24px;">¡Solicitud de Cita Recibida!</h2>
-                      <p style="margin: 5px 0 0;">Estamos procesando tu reservación.</p>
+                      <h2 style="margin: 0; font-size: 24px;">¡Cita Confirmada!</h2>
+                      <p style="margin: 5px 0 0;">Tu cita dental ya esta agendada</p>
                   </div>
 
                   <div style="padding: 30px;">
                       <h3 style="color: #333;">Hola ${pacienteNombre},</h3>
                       <p style="font-size: 16px; color: #555; line-height: 1.5;">
-                          Tu solicitud de cita ha sido agendada exitosamente y está pendiente de confirmación por el médico. Una vez que el Dr(a). ${detalles.Medico_Apellidos} la revise, recibirás un correo de confirmación final.
+                          Tu cita con el doctor(a) ${detalles.Medico_Apellidos} a sido agendada, recuerda que las cancelaciones deberán registrarse en el sistema con un mínimo de 7 días antes de la cita.
                       </p>
 
                       <div style="background-color: #f8f9fa; border: 1px solid #e9ecef; border-radius: 6px; padding: 15px; margin: 20px 0;">
                           <h4 style="color: #007bff; margin-top: 0; border-bottom: 2px solid #007bff; padding-bottom: 5px;">Detalles de tu Cita</h4>
                           <table style="width: 100%; border-collapse: collapse;">
                               <tr>
-                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Servicio:</td>
+                                  <td style="padding: 8px 0; font-weight: bold; color: #333;">Servicio: </td>
                                   <td style="padding: 8px 0; color: #555;">${detalles.Servicio_Nombre}</td>
                               </tr>
                               <tr>
