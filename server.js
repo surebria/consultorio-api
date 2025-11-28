@@ -1564,25 +1564,64 @@ app.get("/api/medico/mis-pacientes", checkJwt, async (req, res) => {
 
 // GET /api/paciente/:id_paciente
 // Obtiene la información completa de un paciente por su ID
+
+// ENDPOINT MEJORADO CON SEGURIDAD
 app.get("/api/paciente/:id_paciente", checkJwt, async (req, res) => {
     const connection = await pool.getConnection();
     
     try {
         const idPaciente = req.params.id_paciente;
-
-        // 1. Verificar que el usuario es médico (por seguridad)
         const auth0Id = req.auth.payload.sub;
+
+        // 1. Verificar que el usuario existe y obtener su rol
         const [userRows] = await connection.query(
-            "SELECT Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+            "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
             [auth0Id]
         );
 
-        if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
-            return res.status(403).json({ error: "Acceso denegado. Solo médicos pueden acceder a la información de pacientes." });
+        if (userRows.length === 0) {
+            return res.status(404).json({ error: "Usuario no encontrado" });
         }
 
-        // 2. Obtener la información del paciente
-        // NOTA: Se excluyen Contraseña e ID_Usuario_Auth
+        const userId = userRows[0].ID_Usuario;
+        const userRole = userRows[0].Rol;
+
+        // 2. Verificar que el usuario es médico
+        if (userRole !== 'Medico') {
+            return res.status(403).json({ 
+                error: "Acceso denegado. Solo médicos pueden acceder a la información de pacientes." 
+            });
+        }
+
+        // 3. Obtener el ID del médico
+        const [medicoRows] = await connection.query(
+            "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+            [userId]
+        );
+
+        if (medicoRows.length === 0) {
+            return res.status(403).json({ 
+                error: "Perfil de médico no encontrado" 
+            });
+        }
+
+        const idMedico = medicoRows[0].ID_Medico;
+
+        // 4. VALIDACIÓN CRÍTICA: Verificar que este médico tenga al menos una cita con este paciente
+        const [citasConMedico] = await connection.query(
+            `SELECT COUNT(*) as total 
+             FROM cita 
+             WHERE ID_Paciente = ? AND ID_Medico = ?`,
+            [idPaciente, idMedico]
+        );
+
+        if (citasConMedico[0].total === 0) {
+            return res.status(403).json({ 
+                error: "Acceso denegado: Este paciente no está asignado a usted." 
+            });
+        }
+
+        // 5. Si pasó todas las validaciones, obtener la información del paciente
         const [pacienteRows] = await connection.query(
             `SELECT 
                 ID_Paciente, Nombre, Sexo, FechaNacimiento, Direccion, Codigo_Postal, 
@@ -1596,7 +1635,27 @@ app.get("/api/paciente/:id_paciente", checkJwt, async (req, res) => {
             return res.status(404).json({ error: "Paciente no encontrado" });
         }
 
-        res.json(pacienteRows[0]);
+        // 6. Opcional: Agregar historial de citas con este médico
+        const [historialCitas] = await connection.query(
+            `SELECT 
+                c.ID_Cita,
+                c.Fecha,
+                c.Hora,
+                c.Estado,
+                c.Notas,
+                s.Nombre as Servicio,
+                s.Descripcion as ServicioDescripcion
+             FROM cita c
+             INNER JOIN servicio s ON c.ID_Servicio = s.ID_Servicio
+             WHERE c.ID_Paciente = ? AND c.ID_Medico = ?
+             ORDER BY c.Fecha DESC, c.Hora DESC`,
+            [idPaciente, idMedico]
+        );
+
+        const paciente = pacienteRows[0];
+        paciente.HistorialCitas = historialCitas;
+
+        res.json(paciente);
 
     } catch (error) {
         console.error("Error en /api/paciente/:id_paciente:", error);
@@ -1604,6 +1663,217 @@ app.get("/api/paciente/:id_paciente", checkJwt, async (req, res) => {
     } finally {
         connection.release();
     }
+});
+
+// MANEJO DE HISTORIALES CLINICOS
+
+// MIDDLEWARE PARA VALIDAR ACCESO A PACIENTE
+async function validarAccesoPaciente(req, res, next) {
+    const connection = await pool.getConnection();
+    
+    try {
+        const idPaciente = req.params.id || req.params.id_paciente;
+        const auth0Id = req.auth.payload.sub;
+
+        // 1. Obtener usuario y rol
+        const [userRows] = await connection.query(
+            "SELECT ID_Usuario, Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+            [auth0Id]
+        );
+
+        if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+            return res.status(403).json({ 
+                error: "Acceso denegado. Solo médicos pueden acceder." 
+            });
+        }
+
+        // 2. Obtener ID del médico
+        const [medicoRows] = await connection.query(
+            "SELECT ID_Medico FROM medico WHERE ID_Usuario_Auth = ?",
+            [userRows[0].ID_Usuario]
+        );
+
+        if (medicoRows.length === 0) {
+            return res.status(403).json({ error: "Perfil de médico no encontrado" });
+        }
+
+        // 3. Validar que tenga citas con este paciente
+        const [citasConMedico] = await connection.query(
+            `SELECT COUNT(*) as total 
+             FROM cita 
+             WHERE ID_Paciente = ? AND ID_Medico = ?`,
+            [idPaciente, medicoRows[0].ID_Medico]
+        );
+
+        if (citasConMedico[0].total === 0) {
+            return res.status(403).json({ 
+                error: "Acceso denegado: Este paciente no está asignado a usted." 
+            });
+        }
+
+        // Si pasó todas las validaciones, continuar
+        req.idMedico = medicoRows[0].ID_Medico;
+        next();
+
+    } catch (error) {
+        console.error("Error validando acceso a paciente:", error);
+        res.status(500).json({ error: "Error de validación" });
+    } finally {
+        connection.release();
+    }
+}
+
+// APLICAR EL MIDDLEWARE A TODOS LOS ENDPOINTS DE HISTORIAL CLÍNICO
+
+app.get("/api/paciente/:id/antecedentes", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+
+  try {
+    const [rows] = await connection.query(
+      `SELECT pa.*, ta.Nombre 
+       FROM paciente_antecedente pa
+       INNER JOIN tipo_antecedente ta ON pa.ID_Tipo = ta.ID_Tipo
+       WHERE pa.ID_Paciente = ?`,
+      [idPaciente]
+    );
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error obteniendo antecedentes médicos:", error);
+    res.status(500).json({ error: "Error obteniendo antecedentes médicos" });
+  } finally {
+    connection.release();
+  }
+});
+
+app.post("/api/paciente/:id/antecedentes", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+  const { antecedentes } = req.body;
+
+  if (!Array.isArray(antecedentes)) {
+    return res.status(400).json({ error: "Formato inválido" });
+  }
+
+  try {
+    await connection.beginTransaction();
+
+    await connection.query(
+      "DELETE FROM paciente_antecedente WHERE ID_Paciente = ?",
+      [idPaciente]
+    );
+
+    for (const a of antecedentes) {
+      await connection.query(
+        `INSERT INTO paciente_antecedente (ID_Paciente, ID_Tipo, Valor)
+         VALUES (?, ?, ?)`,
+        [idPaciente, a.ID_Tipo, a.Valor]
+      );
+    }
+
+    await connection.commit();
+    res.json({ ok: true });
+
+  } catch (error) {
+    await connection.rollback();
+    console.error("Error actualizando antecedentes médicos:", error);
+    res.status(500).json({ error: "Error actualizando antecedentes médicos" });
+  } finally {
+    connection.release();
+  }
+});
+
+app.get("/api/paciente/:id/antecedentes-odontologicos", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+
+  try {
+    const [rows] = await connection.query(
+      "SELECT * FROM antecedentes_odontologicos WHERE ID_Paciente = ?",
+      [idPaciente]
+    );
+
+    res.json(rows[0] || null);
+  } catch (error) {
+    console.error("Error obteniendo antecedentes odontológicos:", error);
+    res.status(500).json({ error: "Error obteniendo antecedentes odontológicos" });
+  } finally {
+    connection.release();
+  }
+});
+
+app.put("/api/paciente/:id/antecedentes-odontologicos", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+  const data = req.body;
+
+  try {
+    const [exists] = await connection.query(
+      "SELECT 1 FROM antecedentes_odontologicos WHERE ID_Paciente = ?",
+      [idPaciente]
+    );
+
+    if (exists.length > 0) {
+      await connection.query(
+        `UPDATE antecedentes_odontologicos SET ? WHERE ID_Paciente = ?`,
+        [data, idPaciente]
+      );
+    } else {
+      data.ID_Paciente = idPaciente;
+      await connection.query(
+        `INSERT INTO antecedentes_odontologicos SET ?`,
+        [data]
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Error actualizando antecedentes odontológicos:", error);
+    res.status(500).json({ error: "Error actualizando antecedentes odontológicos" });
+  } finally {
+    connection.release();
+  }
+});
+
+app.get("/api/paciente/:id/evolucion", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+
+  try {
+    const [rows] = await connection.query(
+      "SELECT * FROM evolucion WHERE ID_Paciente = ? ORDER BY Fecha DESC",
+      [idPaciente]
+    );
+
+    res.json(rows);
+  } catch (error) {
+    console.error("Error obteniendo evolución:", error);
+    res.status(500).json({ error: "Error obteniendo evolución" });
+  } finally {
+    connection.release();
+  }
+});
+
+app.post("/api/paciente/:id/evolucion", checkJwt, validarAccesoPaciente, async (req, res) => {
+  const connection = await pool.getConnection();
+  const idPaciente = req.params.id;
+  const data = req.body;
+
+  try {
+    data.ID_Paciente = idPaciente;
+    await connection.query(
+      "INSERT INTO evolucion SET ?",
+      [data]
+    );
+
+    res.json({ ok: true });
+  } catch (error) {
+    console.error("Error agregando evolución:", error);
+    res.status(500).json({ error: "Error agregando evolución" });
+  } finally {
+    connection.release();
+  }
 });
 
 
