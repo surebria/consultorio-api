@@ -21,7 +21,7 @@ const CORREO_REMITENTE_VERIFICADO = 'sonrisasfelicesdental@outlook.com';
 const checkJwt = auth({
   audience: 'https://dev-7iloabq8ips3sdq0.us.auth0.com/api/v2/',
   issuerBaseURL: 'https://dev-7iloabq8ips3sdq0.us.auth0.com/',
-  tokenSigningAlg: process.env.AUTH0_TOKEN_SIGNING_ALG
+  tokenSigningAlg: process.env.AUTH0_TOKEN_SIGNING_ALG || "RS256"
 });
 
 // Conexión a MySQL con promises
@@ -2237,5 +2237,5 @@ app.get('/api/cedulas-prueba', (req, res) => {
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor escuchando en http://localhost:${PORT}`);
+  console.log(`Servidor ejecutandose en http://localhost:${PORT}`);
 });
