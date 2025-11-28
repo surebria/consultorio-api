@@ -1538,16 +1538,15 @@ app.get("/api/medico/mis-pacientes", checkJwt, async (req, res) => {
 
     const idMedico = medicoRows[0].ID_Medico;
 
-    // 3. Consulta: Obtener la lista de pacientes únicos a partir de citas donde el médico está asignado y la cita no está Cancelada.
+    // 3. Consulta: Obtener la lista de pacientes únicos a partir de citas donde el médico está asignado
+    // Independientemente de que la cita se haya cancelado o no
     const [pacientes] = await connection.query(
       `SELECT DISTINCT
         p.ID_Paciente,
         p.Nombre
       FROM cita c
       INNER JOIN paciente p ON c.ID_Paciente = p.ID_Paciente
-      WHERE c.ID_Medico = ? 
-        AND c.Estado != 'Cancelada'
-      ORDER BY p.Nombre`,
+      WHERE c.ID_Medico = ? ORDER BY p.Nombre`,
       [idMedico]
     );
 
