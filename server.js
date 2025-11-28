@@ -1565,7 +1565,7 @@ app.get("/api/medico/mis-pacientes", checkJwt, async (req, res) => {
 // GET /api/paciente/:id_paciente
 // Obtiene la información completa de un paciente por su ID
 
-// ENDPOINT MEJORADO CON SEGURIDAD
+// ENDPOINT PARA MEDICOS
 app.get("/api/paciente/:id_paciente", checkJwt, async (req, res) => {
     const connection = await pool.getConnection();
     
@@ -1724,6 +1724,39 @@ async function validarAccesoPaciente(req, res, next) {
 }
 
 // APLICAR EL MIDDLEWARE A TODOS LOS ENDPOINTS DE HISTORIAL CLÍNICO
+
+app.get("/api/antecedente/tipos", checkJwt, async (req, res) => {
+    const connection = await pool.getConnection();
+
+    try {
+        // Validación: Solo permitir acceso a médicos
+        const auth0Id = req.auth.payload.sub;
+        const [userRows] = await connection.query(
+            "SELECT Rol FROM usuario_auth0 WHERE Auth0_ID = ?",
+            [auth0Id]
+        );
+
+        if (userRows.length === 0 || userRows[0].Rol !== 'Medico') {
+            return res.status(403).json({ 
+                error: "Acceso denegado. Solo médicos pueden acceder a la lista de tipos de antecedentes." 
+            });
+        }
+        
+        // Consultar todos los tipos de antecedentes disponibles
+        const [rows] = await connection.query(
+            "SELECT ID_Tipo, Nombre FROM tipo_antecedente ORDER BY Nombre ASC"
+        );
+
+        // Si la tabla está vacía, se devolverá un array vacío, lo cual es correcto.
+        res.json(rows);
+
+    } catch (error) {
+        console.error("Error obteniendo tipos de antecedente:", error);
+        res.status(500).json({ error: "Error interno al obtener tipos de antecedente" });
+    } finally {
+        connection.release();
+    }
+});
 
 app.get("/api/paciente/:id/antecedentes", checkJwt, validarAccesoPaciente, async (req, res) => {
   const connection = await pool.getConnection();
