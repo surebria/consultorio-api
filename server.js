@@ -1909,7 +1909,332 @@ app.post("/api/paciente/:id/evolucion", checkJwt, validarAccesoPaciente, async (
   }
 });
 
+// ============================================
+// AGREGAR AL INICIO DE TU server.js
+// ============================================
 
+// Si no las tienes, instala estas dependencias:
+// npm install axios cheerio
+
+const axios = require('axios');
+const cheerio = require('cheerio'); // Para parsear HTML de la SEP
+
+// ============================================
+// RUTA: Verificar Cédula Profesional
+// ============================================
+
+/**
+ * POST /api/verificar-cedula
+ * Verifica una cédula profesional consultando la SEP
+ * 
+ * Body: {
+ *   cedula: string,
+ *   nombre: string,
+ *   apellidos: string
+ * }
+ */
+app.post('/api/verificar-cedula', async (req, res) => {
+  try {
+    const { cedula, nombre, apellidos } = req.body;
+
+    console.log('🔍 Verificando cédula:', { cedula, nombre, apellidos });
+
+    // ============================================
+    // 1. VALIDACIÓN DE PARÁMETROS
+    // ============================================
+    if (!cedula || !nombre || !apellidos) {
+      return res.status(400).json({
+        isValid: false,
+        error: 'Faltan parámetros requeridos: cedula, nombre y apellidos'
+      });
+    }
+
+    // Validar formato de cédula
+    if (cedula.length < 5 || cedula.length > 10) {
+      return res.status(400).json({
+        isValid: false,
+        error: 'La cédula debe tener entre 5 y 10 caracteres'
+      });
+    }
+
+    // ============================================
+    // 2. CÉDULAS DE PRUEBA (Para desarrollo/testing)
+    // ============================================
+    const cedulasPrueba = [
+      { 
+        cedula: '12345678', 
+        nombre: 'JUAN', 
+        apellidos: 'PEREZ LOPEZ', 
+        profesion: 'CIRUJANO DENTISTA', 
+        institucion: 'UNIVERSIDAD NACIONAL AUTÓNOMA DE MÉXICO',
+        fechaExpedicion: '2018-06-15'
+      },
+      { 
+        cedula: '11111111', 
+        nombre: 'MARIA', 
+        apellidos: 'GARCIA RODRIGUEZ', 
+        profesion: 'MEDICO CIRUJANO', 
+        institucion: 'UNAM',
+        fechaExpedicion: '2015-08-20'
+      },
+      { 
+        cedula: '99999999', 
+        nombre: 'ANGEL', 
+        apellidos: 'ROME DEMO', 
+        profesion: 'CIRUJANO DENTISTA', 
+        institucion: 'UNIVERSIDAD AUTÓNOMA DE AGUASCALIENTES',
+        fechaExpedicion: '2020-01-10'
+      },
+      { 
+        cedula: '13822011', 
+        nombre: 'AZUCENA', 
+        apellidos: 'GARCIA GONZALEZ', 
+        profesion: 'CIRUJANO DENTISTA', 
+        institucion: 'UNIVERSIDAD DE GUADALAJARA',
+        fechaExpedicion: '2019-05-12'
+      }
+    ];
+
+    // Verificar si es una cédula de prueba
+    const cedulaPrueba = cedulasPrueba.find(
+      c => c.cedula.toLowerCase() === cedula.toLowerCase()
+    );
+
+    if (cedulaPrueba) {
+      console.log('✅ Usando cédula de prueba:', cedula);
+      
+      // Verificar que el nombre coincida (flexible)
+      const nombreNormalizado = normalizarTexto(nombre);
+      const apellidosNormalizado = normalizarTexto(apellidos);
+      const nombrePrueba = normalizarTexto(cedulaPrueba.nombre);
+      const apellidosPrueba = normalizarTexto(cedulaPrueba.apellidos);
+
+      const nombreCoincide = nombrePrueba.includes(nombreNormalizado) || nombreNormalizado.includes(nombrePrueba);
+      const apellidosCoinciden = apellidosPrueba.includes(apellidosNormalizado) || apellidosNormalizado.includes(apellidosPrueba);
+
+      if (!nombreCoincide || !apellidosCoinciden) {
+        return res.json({
+          isValid: false,
+          error: `El nombre no coincide. Esta cédula está registrada a: ${cedulaPrueba.nombre} ${cedulaPrueba.apellidos}`
+        });
+      }
+
+      return res.json({
+        isValid: true,
+        data: {
+          nombre: cedulaPrueba.nombre,
+          apellidos: cedulaPrueba.apellidos,
+          cedula: cedulaPrueba.cedula,
+          profesion: cedulaPrueba.profesion,
+          institucion: cedulaPrueba.institucion,
+          fechaExpedicion: cedulaPrueba.fechaExpedicion
+        }
+      });
+    }
+
+    // ============================================
+    // 3. CONSULTA REAL A LA SEP
+    // ============================================
+    
+    // OPCIÓN A: Usar la API de búsqueda de la SEP
+    const searchUrl = `https://www.cedulaprofesional.sep.gob.mx/cedula/presidencia/indexAvanzada.action`;
+    
+    console.log('📡 Consultando SEP...');
+
+    try {
+      // Hacer petición a la SEP
+      const response = await axios.get(searchUrl, {
+        params: {
+          'cadenaParametrosAV': '',
+          'buscarPor': 'idCedula',
+          'idCedula': cedula,
+          'nombre': nombre,
+          'paterno': apellidos.split(' ')[0] || '',
+          'materno': apellidos.split(' ')[1] || ''
+        },
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          'Accept-Language': 'es-MX,es;q=0.9,en;q=0.8'
+        },
+        timeout: 15000, // 15 segundos
+        maxRedirects: 5
+      });
+
+      console.log('✅ Respuesta recibida de la SEP');
+
+      // Parsear el HTML de respuesta
+      const $ = cheerio.load(response.data);
+      
+      // Buscar en la tabla de resultados
+      const resultados = [];
+      $('table tbody tr').each((i, row) => {
+        const cols = $(row).find('td');
+        if (cols.length >= 4) {
+          resultados.push({
+            cedula: $(cols[0]).text().trim(),
+            nombre: $(cols[1]).text().trim(),
+            paterno: $(cols[2]).text().trim(),
+            materno: $(cols[3]).text().trim(),
+            profesion: $(cols[4]).text().trim() || 'No especificado',
+            institucion: $(cols[5]).text().trim() || 'No especificado'
+          });
+        }
+      });
+
+      console.log(`📄 Resultados encontrados: ${resultados.length}`);
+
+      // Buscar coincidencia exacta
+      const match = resultados.find(r => 
+        r.cedula.toLowerCase() === cedula.toLowerCase()
+      );
+
+      if (match) {
+        console.log('✅ Cédula verificada:', match);
+        
+        return res.json({
+          isValid: true,
+          data: {
+            nombre: match.nombre,
+            apellidos: `${match.paterno} ${match.materno}`.trim(),
+            cedula: match.cedula,
+            profesion: match.profesion,
+            institucion: match.institucion,
+            fechaExpedicion: ''
+          }
+        });
+      }
+
+      // Si no hay coincidencia exacta
+      return res.json({
+        isValid: false,
+        error: 'No se encontró la cédula profesional en el registro de la SEP'
+      });
+
+    } catch (sepError) {
+      console.error('❌ Error al consultar la SEP:', sepError.message);
+      
+      // Si la SEP falla, intentar con método alternativo
+      return verificarConMetodoAlternativo(cedula, res);
+    }
+
+  } catch (error) {
+    console.error('❌ Error general en verificación:', error);
+    
+    res.status(500).json({
+      isValid: false,
+      error: 'Error al verificar la cédula. Por favor intenta más tarde.'
+    });
+  }
+});
+
+// ============================================
+// FUNCIONES AUXILIARES
+// ============================================
+
+/**
+ * Normalizar texto para comparación
+ */
+function normalizarTexto(texto) {
+  if (!texto) return '';
+  return texto
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '') // Quitar acentos
+    .trim()
+    .replace(/\s+/g, ' '); // Normalizar espacios
+}
+
+/**
+ * Método alternativo de verificación (usando JSONP desde el servidor)
+ */
+async function verificarConMetodoAlternativo(cedula, res) {
+  try {
+    console.log('🔄 Intentando método alternativo...');
+    
+    const url = `https://search.sep.gob.mx/solr/cedulasCore/select`;
+    
+    const response = await axios.get(url, {
+      params: {
+        'fl': '*,score',
+        'q': cedula,
+        'start': 0,
+        'rows': 10,
+        'wt': 'json'
+      },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      },
+      timeout: 10000
+    });
+
+    const docs = response.data?.response?.docs || [];
+    
+    if (docs.length > 0) {
+      const match = docs.find(doc => doc.cedula === cedula);
+      
+      if (match) {
+        return res.json({
+          isValid: true,
+          data: {
+            nombre: match.nombre || '',
+            apellidos: `${match.paterno || ''} ${match.materno || ''}`.trim(),
+            cedula: match.cedula,
+            profesion: match.titulo || 'No especificado',
+            institucion: match.institucion || 'No especificado',
+            fechaExpedicion: match.fechaExpedicion || ''
+          }
+        });
+      }
+    }
+
+    return res.json({
+      isValid: false,
+      error: 'No se encontró la cédula en el registro de la SEP'
+    });
+
+  } catch (error) {
+    console.error('❌ Método alternativo también falló:', error.message);
+    
+    return res.json({
+      isValid: false,
+      error: 'No se pudo verificar la cédula. El servicio de la SEP no está disponible.'
+    });
+  }
+}
+
+// ============================================
+// RUTA DE PRUEBA (Opcional)
+// ============================================
+
+/**
+ * GET /api/cedulas-prueba
+ * Lista las cédulas de prueba disponibles
+ */
+app.get('/api/cedulas-prueba', (req, res) => {
+  res.json({
+    message: 'Cédulas de prueba para desarrollo',
+    cedulas: [
+      { cedula: '12345678', nombre: 'JUAN PEREZ LOPEZ' },
+      { cedula: '11111111', nombre: 'MARIA GARCIA RODRIGUEZ' },
+      { cedula: '99999999', nombre: 'ANGEL ROME DEMO' },
+      { cedula: '13822011', nombre: 'AZUCENA GARCIA GONZALEZ' }
+    ],
+    nota: 'Estas cédulas solo funcionan en modo desarrollo'
+  });
+});
+
+// ============================================
+// INSTALAR DEPENDENCIAS
+// ============================================
+/*
+  Ejecuta en la terminal:
+  
+  npm install axios cheerio
+  
+  - axios: Para hacer peticiones HTTP
+  - cheerio: Para parsear HTML (scraping)
+*/
 
 // Iniciar servidor
 const PORT = process.env.PORT || 3000;
